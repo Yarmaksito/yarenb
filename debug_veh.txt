@@ -1,0 +1,2 @@
+This file was created by ImVehFt.asi
+Current plugin version: 2.0.2

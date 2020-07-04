@@ -1,0 +1,8 @@
+# Moon texture
+imfx\moon.png
+# Moon size
+1.0
+# Moon color intensity RGBA
+1.0 1.0 0.85 1.0
+# Moon blend values Src/Dst
+7 2

@@ -1,0 +1,360 @@
+//++++++++++++++++++++++++++++++++++++++++++++
+// ENBSeries effect file
+// visit http://enbdev.com for updates
+// Copyright (c) 2007-2013 Boris Vorontsov
+// MasterEffect 2 effect.txt file
+// Copyright by MartyMcFly
+// IF YOU UPLOAD YOUR ENB SOMEWHERE. DO NOT REMOVE 
+// THIS COPYRIGHT OR YOUR ENB WILL BE REPORTED
+//++++++++++++++++++++++++++++++++++++++++++++
+
+#define FXAA					1	// Anti Aliasing for smoothing jaggy edges
+#define CHROMATICABBERATION			0	// Imitates fish-eye look and chroma shift at screen edges 
+
+
+
+				/////////////////////////////////
+				//////CHROMATIC ABBERATION///////
+				/////////////////////////////////
+
+#define ChromaticAmount			0.009		// Amount of color shift to be applied
+#define LensSize			0.55		// Amount of zoom applied to cover buggy screen edges
+#define LensDistortion	 		0.05		// Fish-eye distortion amount
+#define LensDistortionCubic		0.05		// Same but Cubic-based
+//+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+				/////////////////////////////////
+				//////////////FXAA///////////////
+				/////////////////////////////////
+
+
+#define FXAA_LINEAR 				0
+#define FXAA_QUALITY__EDGE_THRESHOLD 		(1.0/32.0)
+#define FXAA_QUALITY__EDGE_THRESHOLD_MIN 	(1.0/16.0)
+#define FXAA_QUALITY__SUBPIX_CAP 		(7.0/8.0)
+#define FXAA_QUALITY__SUBPIX_TRIM 		(1.0/12.0)
+#define FXAA_SEARCH_STEPS 			16
+#define FXAA_SEARCH_THRESHOLD 			(1.0/4.0)
+//+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+
+//+++++++++++++++++++++++++++++
+//external parameters, do not modify
+//+++++++++++++++++++++++++++++
+//keyboard controlled temporary variables (in some versions exists in the config file). Press and hold key 1,2,3...8 together with PageUp or PageDown to modify. By default all set to 1.0
+float4 tempF1; //0,1,2,3
+float4 tempF2; //5,6,7,8
+float4 tempF3; //9,0
+//x=generic timer in range 0..1, period of 16777216 ms (4.6 hours), w=frame time elapsed (in seconds)
+float4 Timer;
+//x=Width, y=1/Width, z=ScreenScaleY, w=1/ScreenScaleY
+float4 ScreenSize;
+
+//textures
+texture2D texColor;
+texture2D texNoise;
+
+sampler2D InputSampler = sampler_state
+{
+Texture = <texColor>;
+MinFilter = LINEAR;
+MagFilter = LINEAR;
+MipFilter = NONE;//NONE;
+AddressU = Clamp;
+AddressV = Clamp;
+SRGBTexture=FALSE;
+MaxMipLevel=0;
+MipMapLodBias=0;
+};
+
+sampler2D SamplerNoise = sampler_state
+{
+Texture = <texNoise>;
+MinFilter = POINT;
+MagFilter = POINT;
+MipFilter = NONE;//NONE;
+AddressU = Wrap;
+AddressV = Wrap;
+SRGBTexture=FALSE;
+MaxMipLevel=0;
+MipMapLodBias=0;
+};
+
+struct VS_OUTPUT_POST {
+float4 vpos : POSITION;
+float2 txcoord : TEXCOORD0;
+};
+
+struct VS_INPUT_POST {
+float3 pos : POSITION;
+float2 txcoord : TEXCOORD0;
+};
+
+//++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+//
+//++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+VS_OUTPUT_POST VS_PostProcess(VS_INPUT_POST IN)
+{
+VS_OUTPUT_POST OUT;
+
+float4 pos=float4(IN.pos.x,IN.pos.y,IN.pos.z,1.0);
+
+OUT.vpos=pos;
+OUT.txcoord.xy=IN.txcoord.xy;
+
+return OUT;
+}
+
+
+/*============================================================================
+FXAA3 QUALITY - PC
+NVIDIA FXAA III.8 by TIMOTHY LOTTES
+============================================================================*/
+
+#define FXAA_QUALITY__SUBPIX_TRIM_SCALE (1.0/(1.0 - FXAA_QUALITY__SUBPIX_TRIM))
+
+float4 FxaaPixelShader(VS_OUTPUT_POST IN, float2 vPos : VPOS) : COLOR
+{
+
+#define FxaaTexTop(t, p) tex2Dlod(t, float4(p, 0.0, 0.0))
+#define FxaaTexOff(t, p, o, r) tex2Dlod(t, float4(p + (o * r), 0, 0))
+
+float2 pos = IN.txcoord.xy;
+
+float2 rcpFrame = float2(1/ScreenSize.x, ScreenSize.z/ScreenSize.x);
+float4 rcpFrameOpt = float4(2/ScreenSize.x, 2*ScreenSize.z/ScreenSize.x, 0.5/ScreenSize.x, 0.5*ScreenSize.z/ScreenSize.x);
+
+float lumaN = dot(FxaaTexOff(InputSampler, pos.xy, float2(0, -1), rcpFrame.xy).xyz, float3(0.299, 0.587, 0.114));
+float lumaW = dot(FxaaTexOff(InputSampler, pos.xy, float2(-1, 0), rcpFrame.xy).xyz, float3(0.299, 0.587, 0.114));
+
+
+float4 rgbyM;
+rgbyM.xyz = FxaaTexTop(InputSampler, pos.xy).xyz;
+rgbyM.w = dot(rgbyM.xyz, float3(0.299, 0.587, 0.114));
+float lumaE = dot(FxaaTexOff(InputSampler, pos.xy, float2( 1, 0), rcpFrame.xy).xyz, float3(0.299, 0.587, 0.114));
+float lumaS = dot(FxaaTexOff(InputSampler, pos.xy, float2( 0, 1), rcpFrame.xy).xyz, float3(0.299, 0.587, 0.114));
+float lumaM = rgbyM.w;
+
+
+float rangeMin = min(lumaM, min(min(lumaN, lumaW), min(lumaS, lumaE)));
+float rangeMax = max(lumaM, max(max(lumaN, lumaW), max(lumaS, lumaE)));
+float range = rangeMax - rangeMin;
+
+if(range < max(FXAA_QUALITY__EDGE_THRESHOLD_MIN, rangeMax * FXAA_QUALITY__EDGE_THRESHOLD)) return rgbyM;
+
+
+float lumaNW = dot(FxaaTexOff(InputSampler, pos.xy, float2(-1,-1), rcpFrame.xy).xyz, float3(0.299, 0.587, 0.114));
+float lumaNE = dot(FxaaTexOff(InputSampler, pos.xy, float2( 1,-1), rcpFrame.xy).xyz, float3(0.299, 0.587, 0.114));
+float lumaSW = dot(FxaaTexOff(InputSampler, pos.xy, float2(-1, 1), rcpFrame.xy).xyz, float3(0.299, 0.587, 0.114));
+float lumaSE = dot(FxaaTexOff(InputSampler, pos.xy, float2( 1, 1), rcpFrame.xy).xyz, float3(0.299, 0.587, 0.114));
+
+
+
+float lumaL = (lumaN + lumaW + lumaE + lumaS) * 0.25;
+float rangeL = abs(lumaL - lumaM);
+float blendL = saturate((rangeL / range) - FXAA_QUALITY__SUBPIX_TRIM) * FXAA_QUALITY__SUBPIX_TRIM_SCALE;
+blendL = min(FXAA_QUALITY__SUBPIX_CAP, blendL);
+
+float edgeVert = abs(lumaNW + (-2.0 * lumaN) + lumaNE) + 2.0 * abs(lumaW + (-2.0 * lumaM) + lumaE ) + abs(lumaSW + (-2.0 * lumaS) + lumaSE);
+float edgeHorz = abs(lumaNW + (-2.0 * lumaW) + lumaSW) + 2.0 * abs(lumaN + (-2.0 * lumaM) + lumaS ) + abs(lumaNE + (-2.0 * lumaE) + lumaSE);
+bool horzSpan = edgeHorz >= edgeVert;
+
+float lengthSign = horzSpan ? -rcpFrame.y : -rcpFrame.x;
+if(!horzSpan) lumaN = lumaW;
+if(!horzSpan) lumaS = lumaE;
+float gradientN = abs(lumaN - lumaM);
+float gradientS = abs(lumaS - lumaM);
+lumaN = (lumaN + lumaM) * 0.5;
+lumaS = (lumaS + lumaM) * 0.5;
+
+bool pairN = gradientN >= gradientS;
+if(!pairN) lumaN = lumaS;
+if(!pairN) gradientN = gradientS;
+if(!pairN) lengthSign *= -1.0;
+float2 posN;
+posN.x = pos.x + (horzSpan ? 0.0 : lengthSign * 0.5);
+posN.y = pos.y + (horzSpan ? lengthSign * 0.5 : 0.0);
+
+
+gradientN *= FXAA_SEARCH_THRESHOLD;
+
+float2 posP = posN;
+float2 offNP = horzSpan ?
+float2(rcpFrame.x, 0.0) :
+float2(0.0f, rcpFrame.y);
+float lumaEndN;
+float lumaEndP;
+bool doneN = false;
+bool doneP = false;
+posN += offNP * (-1.5);
+posP += offNP * ( 1.5);
+for(int i = 0; i < FXAA_SEARCH_STEPS; i++)
+{
+lumaEndN = dot(FxaaTexTop(InputSampler, posN.xy).xyz, float3(0.299, 0.587, 0.114));
+lumaEndP = dot(FxaaTexTop(InputSampler, posP.xy).xyz, float3(0.299, 0.587, 0.114));
+bool doneN2 = abs(lumaEndN - lumaN) >= gradientN;
+bool doneP2 = abs(lumaEndP - lumaN) >= gradientN;
+if(doneN2 && !doneN) posN += offNP;
+if(doneP2 && !doneP) posP -= offNP;
+if(doneN2 && doneP2) break;
+doneN = doneN2;
+doneP = doneP2;
+if(!doneN) posN -= offNP * 2.0;
+if(!doneP) posP += offNP * 2.0;
+}
+
+float dstN = horzSpan ? pos.x - posN.x : pos.y - posN.y;
+float dstP = horzSpan ? posP.x - pos.x : posP.y - pos.y;
+
+bool directionN = dstN < dstP;
+lumaEndN = directionN ? lumaEndN : lumaEndP;
+
+if(((lumaM - lumaN) < 0.0) == ((lumaEndN - lumaN) < 0.0))
+lengthSign = 0.0;
+
+float spanLength = (dstP + dstN);
+dstN = directionN ? dstN : dstP;
+float subPixelOffset = 0.5 + (dstN * (-1.0/spanLength));
+subPixelOffset += blendL * (1.0/8.0);
+subPixelOffset *= lengthSign;
+float3 rgbF = FxaaTexTop(InputSampler, float2(pos.x + (horzSpan ? 0.0 : subPixelOffset), pos.y + (horzSpan ? subPixelOffset : 0.0))).xyz;
+
+#if (FXAA_LINEAR == 1)
+lumaL *= lumaL;
+#endif
+float lumaF = dot(rgbF, float3(0.299, 0.587, 0.114)) + (1.0/(65536.0*256.0));
+float lumaB = lerp(lumaF, lumaL, blendL);
+float scale = min(4.0, lumaB/lumaF);
+rgbF *= scale;
+
+return float4(rgbF, lumaM);
+}
+
+
+#if (CHROMATICABBERATION == 1)
+
+float4 ChromaticLens(VS_OUTPUT_POST IN, float2 vPos : VPOS) : COLOR
+{
+
+float4	res;
+
+float4 coord=0.0;
+coord.xy=IN.txcoord.xy;
+coord.w=0.0;  
+float3 eta = float3(1.0+ChromaticAmount*0.9,1.0+ChromaticAmount*0.6,1.0+ChromaticAmount*0.3);
+float2 center;
+center.x = coord.x-0.5;
+center.y = coord.y-0.5;
+float LensZoom = 1.0/LensSize;
+
+float r2 = (IN.txcoord.x-0.5) * (IN.txcoord.x-0.5) + (IN.txcoord.y-0.5) * (IN.txcoord.y-0.5);     
+float f = 0;
+
+if( LensDistortionCubic == 0.0){
+	f = 1 + r2 * LensDistortion;
+}else{
+                f = 1 + r2 * (LensDistortion + LensDistortionCubic * sqrt(r2));
+};
+
+float x = f*LensZoom*(coord.x-0.5)+0.5;
+float y = f*LensZoom*(coord.y-0.5)+0.5;
+float2 rCoords = (f*eta.r)*LensZoom*(center.xy*0.5)+0.5;
+float2 gCoords = (f*eta.g)*LensZoom*(center.xy*0.5)+0.5;
+float2 bCoords = (f*eta.b)*LensZoom*(center.xy*0.5)+0.5;
+
+float4 inputDistord = float4(tex2D(InputSampler,rCoords).r , tex2D(InputSampler,gCoords).g ,tex2D(InputSampler,bCoords).b, tex2D(InputSampler,float2(x,y)).a);
+
+float4 schmotzcolor = float4(inputDistord.r,inputDistord.g,inputDistord.b,1);
+
+return schmotzcolor;
+}
+#endif
+
+
+#if (FXAA==1)
+technique PostProcess
+{
+pass P0
+{
+VertexShader = compile vs_3_0 VS_PostProcess();
+PixelShader = compile ps_3_0 FxaaPixelShader();
+
+FogEnable=FALSE;
+ALPHATESTENABLE=FALSE;
+SEPARATEALPHABLENDENABLE=FALSE;
+AlphaBlendEnable=FALSE;
+FogEnable=FALSE;
+SRGBWRITEENABLE=FALSE;
+}
+}
+
+technique PostProcess2
+{
+pass P0
+{
+VertexShader = compile vs_3_0 VS_PostProcess();
+PixelShader = compile ps_3_0 FxaaPixelShader();
+
+FogEnable=FALSE;
+ALPHATESTENABLE=FALSE;
+SEPARATEALPHABLENDENABLE=FALSE;
+AlphaBlendEnable=FALSE;
+FogEnable=FALSE;
+SRGBWRITEENABLE=FALSE;
+}
+}
+
+technique PostProcess3
+{
+pass P0
+{
+VertexShader = compile vs_3_0 VS_PostProcess();
+PixelShader = compile ps_3_0 FxaaPixelShader();
+
+FogEnable=FALSE;
+ALPHATESTENABLE=FALSE;
+SEPARATEALPHABLENDENABLE=FALSE;
+AlphaBlendEnable=FALSE;
+FogEnable=FALSE;
+SRGBWRITEENABLE=FALSE;
+}
+}
+
+technique PostProcess4
+{
+pass P0
+{
+VertexShader = compile vs_3_0 VS_PostProcess();
+PixelShader = compile ps_3_0 FxaaPixelShader();
+
+FogEnable=FALSE;
+ALPHATESTENABLE=FALSE;
+SEPARATEALPHABLENDENABLE=FALSE;
+AlphaBlendEnable=FALSE;
+FogEnable=FALSE;
+SRGBWRITEENABLE=FALSE;
+}
+}
+#endif
+
+#if (CHROMATICABBERATION == 1)
+	#if (FXAA == 1)
+	technique PostProcess5
+	#else
+	technique PostProcess
+	#endif
+{
+pass P0
+{
+VertexShader = compile vs_3_0 VS_PostProcess();
+PixelShader = compile ps_3_0 ChromaticLens();
+
+FogEnable=FALSE;
+ALPHATESTENABLE=FALSE;
+SEPARATEALPHABLENDENABLE=FALSE;
+AlphaBlendEnable=FALSE;
+FogEnable=FALSE;
+SRGBWRITEENABLE=FALSE;
+}
+}
+#endif

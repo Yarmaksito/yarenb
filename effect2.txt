@@ -1,0 +1,330 @@
+//SAGE(San Andreas Graphics Enhancement)
+//Advanced Color Correction, Bloom and Tonemapping in 1 shader(!!)
+
+//--------------------------------------------------------------------------------------
+// Defines
+//--------------------------------------------------------------------------------------
+#define COLOR_CORRECTION
+#define TONEMAPPING_MODE_0
+//--------------------------------------------------------------------------------------
+// Vectors, floats and etc.
+//--------------------------------------------------------------------------------------
+
+float ScreenScaleY;
+float ScreenSize;
+float2 screenRes = {1024,768};//screen resolution 1024x768 for example
+
+float _ExposureAdjustment = 3.3;//Adjust Exposure; Настройка Экспозиции
+static const float gray = 0.05;
+static const float white = 0.1;
+float4 _HdrParams = {gray,gray,gray,white*white};
+
+static const float thresh = 1.50;
+float4 threshhold = {thresh, 1/(1-thresh), 5.0, 5.0};
+float BloomIntensity = 0.5;
+
+//--------------------------------------------------------------------------------------
+// Textures
+//--------------------------------------------------------------------------------------
+
+texture2D texColor;
+texture2D texDepth;
+texture2D texNoise;
+
+//--------------------------------------------------------------------------------------
+// Sampler Inputs
+//--------------------------------------------------------------------------------------
+
+sampler2D InputSampler = sampler_state
+{
+    Texture = (texColor);
+    MinFilter = POINT;
+    MagFilter = POINT;
+    MipFilter = POINT;
+    AddressU   = Clamp;
+	AddressV   = Clamp;
+	SRGBTexture=FALSE;
+	MaxMipLevel=0;
+	MipMapLodBias=0;
+};
+
+sampler2D SamplerDepth = sampler_state
+{
+	Texture   = <texDepth>;
+	MinFilter = POINT;
+	MagFilter = POINT;
+	MipFilter = NONE;
+	AddressU  = Clamp;
+	AddressV  = Clamp;
+	SRGBTexture=FALSE;
+	MaxMipLevel=0;
+	MipMapLodBias=0;
+};
+
+sampler2D SamplerNoise = sampler_state
+{
+	Texture   = <texNoise>;
+	MinFilter = LINEAR;
+	MagFilter = LINEAR;
+	MipFilter = LINEAR;
+	AddressU  = Wrap;
+	AddressV  = Wrap;
+	SRGBTexture = FALSE;
+	MaxMipLevel = 0;
+	MipMapLodBias = 0;
+};
+
+struct VS_OUTPUT_POST
+{
+	float4 vpos  : POSITION;
+	float2 txcoord : TEXCOORD0;
+};
+
+struct VS_INPUT_POST
+{
+	float3 pos  : POSITION;
+	float2 txcoord : TEXCOORD0;
+};
+
+//--------------------------------------------------------------------------------------
+// Functions
+//--------------------------------------------------------------------------------------
+
+float Luminance( float3 c )
+{
+	return dot( c, float3(0.22, 0.707, 0.071) );
+}
+
+//--------------------------------------------------------------------------------------
+// Vertex Shader Input
+//--------------------------------------------------------------------------------------
+
+VS_OUTPUT_POST VS_PostProcess(VS_INPUT_POST IN)
+{
+	VS_OUTPUT_POST OUT;
+
+	float4 pos=float4(IN.pos.x,IN.pos.y,IN.pos.z,1.0);
+
+	OUT.vpos=pos;
+	OUT.txcoord.xy=IN.txcoord.xy;
+
+	return OUT;
+}
+
+float4 paramsS = {1.0,1.0,1.0,1.0};//Цветокорекция тени, Shadow Color Corection
+float4 paramsM = {1.0,1.0,1.0,1.0};//Цветокорекция полутени(среднего значения), Middle Color Corection
+float4 paramsH = {1.0,1.0,1.0,1.0};//Цветокорекция ярких областей, High Color Corection
+float _Saturation = 1.15;//Насыщенность
+const float blurSize = 8.0/256.0;//1/размер текстуры для блума(32,128,512,1024),1/size of bloom tex
+const float BlurDownsampling = 8;//занижение размера(от нуля до 16(хотя лучше больше 8 не ставить))
+
+float4 CCShadow (VS_OUTPUT_POST i, float2 vPos : VPOS) : COLOR
+{
+	float4 col = tex2D(InputSampler, i.txcoord);
+	//float4 color = tex2Dlod(InputSampler, float4(i.txcoord,0,8));
+	
+    float4 sum = float4(0,0,0,0);
+ 
+    // blur this in y (vertical)
+    // also I downsample it to get interesting result 
+    sum += tex2Dlod(InputSampler, float4(i.txcoord.x - 4.0*blurSize, i.txcoord.y,0,BlurDownsampling)) * 0.05;
+    sum += tex2Dlod(InputSampler, float4(i.txcoord.x - 3.0*blurSize, i.txcoord.y,0,BlurDownsampling)) * 0.09;
+    sum += tex2Dlod(InputSampler, float4(i.txcoord.x - 2.0*blurSize, i.txcoord.y,0,BlurDownsampling)) * 0.12;
+    sum += tex2Dlod(InputSampler, float4(i.txcoord.x - blurSize, i.txcoord.y,0,BlurDownsampling)) * 0.15;
+    sum += tex2Dlod(InputSampler, float4(i.txcoord.x, i.txcoord.y,0,BlurDownsampling)) * 0.16;
+    sum += tex2Dlod(InputSampler, float4(i.txcoord.x + blurSize, i.txcoord.y,0,BlurDownsampling)) * 0.15;
+    sum += tex2Dlod(InputSampler, float4(i.txcoord.x + 2.0*blurSize, i.txcoord.y,0,BlurDownsampling)) * 0.12;
+    sum += tex2Dlod(InputSampler, float4(i.txcoord.x + 3.0*blurSize, i.txcoord.y,0,BlurDownsampling)) * 0.09;
+    sum += tex2Dlod(InputSampler, float4(i.txcoord.x + 4.0*blurSize, i.txcoord.y,0,BlurDownsampling)) * 0.05;
+	
+	// do some cool stuff to get bloom...
+	float4 color = max(float4(0.0,0.0,0.0,0.0), sum-threshhold.x);
+	float4 toBlend = saturate (color * BloomIntensity);
+	
+	float4 smpl = 1-(1-col)*(1-toBlend);
+	
+	float factor = max(smpl.x, max(smpl.y, smpl.z));
+	float factorM = (smpl.x + smpl.y + smpl.z)/3;
+	float4 shadows = paramsS;
+	float4 midtones = paramsM;
+	float4 highlights = paramsH;
+	
+	float4 Color;
+	#ifdef COLOR_CORRECTION
+	if(factor < 0.1)	//Shadows
+	{
+		if(factor > 0.01)
+		{
+			factor = (factor + 0.09)*10;
+			
+			shadows.w = shadows.x; //.w is value backup
+			shadows.x = ((1 - shadows.w) / 2) * factor;
+			shadows.x += shadows.w;	//Adding backup
+			
+			shadows.w = shadows.y; //.w is value backup
+			shadows.y = ((1 - shadows.w) / 2) * factor;
+			shadows.y += shadows.w;	//Adding backup
+			
+			shadows.w = shadows.z; //.w is value backup
+			shadows.z = ((1 - shadows.w) / 2) * factor;
+			shadows.z += shadows.w;	//Adding backup
+		}
+		Color = float4(smpl.x * shadows.x, smpl.y * shadows.y, smpl.z * shadows.z, smpl.w);	
+	}
+	else if(factorM >= 0.1 && factorM <= 0.5)	//Middle-tones
+	{
+		if(factorM > 0.3)
+		{
+			factorM = (factorM - 0.31)*10;
+			
+			midtones.w = midtones.x; //.w is value backup
+			midtones.x = ((1 - midtones.w) / 2) * factorM;
+			midtones.x += midtones.w;	//Adding backup
+			
+			midtones.w = midtones.y; //.w is value backup
+			midtones.y = ((1 - midtones.w) / 2) * factorM;
+			midtones.y += midtones.w;	//Adding backup
+			
+			midtones.w = midtones.z; //.w is value backup
+			midtones.z = ((1 - midtones.w) / 2) * factorM;
+			midtones.z += midtones.w;	//Adding backup
+		}
+		else if(factorM <= 0.3)
+		{
+			factorM = (factorM - 0.1)*10;
+			
+			midtones.w = midtones.x;
+			midtones.x = (1 - midtones.w) - (factorM * ((1 - midtones.w) / 2));
+			midtones.x += midtones.w;
+			
+			midtones.w = midtones.y;
+			midtones.y = (1 - midtones.w) - (factorM * ((1 - midtones.w) / 2));
+			midtones.y += midtones.w;
+			
+			midtones.w = midtones.z;
+			midtones.z = (1 - midtones.w) - (factorM * ((1 - midtones.w) / 2));
+			midtones.z += midtones.w;
+		}
+		
+		Color = float4(smpl.x * midtones.x, smpl.y * midtones.y, smpl.z * midtones.z, smpl.w);
+	}		
+	else if(factorM > 0.5)	//Hightlights
+	{
+		if(factorM <= 0.8)
+		{
+			factorM = (factorM - 0.51)*10;
+			
+			highlights.w = highlights.x;
+			highlights.x = (1 - highlights.w) - (factorM * ((1 - highlights.w) / 2));
+			highlights.x += highlights.w;
+			
+			highlights.w = highlights.y;
+			highlights.y = (1 - highlights.w) - (factorM * ((1 - highlights.w) / 2));
+			highlights.y += highlights.w;
+			
+			highlights.w = highlights.z;
+			highlights.z = (1 - highlights.w) - (factorM * ((1 - highlights.w) / 2));
+			highlights.z += highlights.w;
+		}
+	
+		Color = float4(smpl.x * highlights.x, smpl.y * highlights.y, smpl.z * highlights.z, smpl.w);
+	}
+	else Color = smpl;
+	#else
+		Color = smpl;
+	#endif
+	float lum = Luminance(Color.xyz);
+	#ifdef TONEMAPPING_MODE_0
+		Color = float4(lerp(float3(lum,lum,lum), Color.xyz, _Saturation),1);
+		return 1-exp2(-_ExposureAdjustment * Color);
+	#endif
+	#ifdef TONEMAPPING_MODE_1
+		float avgLum = tex2Dlod(InputSampler, float4(IN.txcoord,0,4));
+		
+		float cieLum = max(0.000001, lum); //ToCIE(Color.rgb);
+		
+		float lumScaled = cieLum * gray / (0.001 + avgLum);
+		
+		lumScaled = (lumScaled * (1.0f + lumScaled / (white*white)))/(1.0f + lumScaled);
+		
+		//cie.r = lumScaled; 
+		
+		Color.rgb = Color.rgb * (lumScaled / cieLum);
+		
+		//color.rgb = FromCIE(cie);		
+		return Color;
+	#endif
+	#ifdef TONEMAPPING_MODE_2
+		float A = 0.15;
+		float B = 0.50;
+		float C = 0.10;
+		float D = 0.20;
+		float E = 0.02;
+		float F = 0.30;
+		float W = 11.2;
+
+		Color *= _ExposureAdjustment;
+
+		float ExposureBias = 2.0;
+		float3 x = ExposureBias*Color;
+		float3 curr = ((x*(A*x+C*B)+D*E)/(x*(A*x+B)+D*F))-E/F;
+		
+		x = W;
+		float3 whiteScale = 1.0f/(((x*(A*x+C*B)+D*E)/(x*(A*x+B)+D*F))-E/F);
+		float3 clr = curr*whiteScale;
+
+		// float3 retColor = pow(clr,1/2.2); // we have SRGB write enabled at this stage
+
+		return float4(clr, 1.0);
+	#endif
+	#ifdef TONEMAPPING_MODE_3
+		float lum = Luminance(Color.rgb); 
+		float lumTm = lum * _ExposureAdjustment;
+		float scale = lumTm / (1+lumTm);  
+		return float4(Color.rgb * scale / lum, Color.a);
+	#endif
+	#ifdef TONEMAPPING_MODE_4
+		Color *= _ExposureAdjustment;
+		float4 X = max(float4(0.0,0.0,0.0,0.0), Color-0.004);
+		float4 retColor = (X*(6.2*X+.5))/(X*(6.2*X+1.7)+0.06);
+		return retColor*retColor;
+	#endif
+	#ifdef TONEMAPPING_MODE_5
+		float4 tapA = tex2Dlod(InputSampler, float4(i.txcoord + float2(1/screenRes.x,1/screenRes.y) * 0.5,0,10));
+		float4 tapB = tex2Dlod(InputSampler, float4(i.txcoord - float2(1/screenRes.x,1/screenRes.y) * 0.5,0,10));
+		float4 tapC = tex2Dlod(InputSampler, float4(i.txcoord + float2(1/screenRes.x,1/screenRes.y) * float2(0.5,-0.5),0,10));
+		float4 tapD = tex2Dlod(InputSampler, float4(i.txcoord - float2(1/screenRes.x,1/screenRes.y) * float2(0.5,-0.5),0,10));
+			
+		float4 average = (tapA+tapB+tapC+tapD)/4;
+		average.y = max(max(tapA.y,tapB.y), max(tapC.y,tapD.y));
+		float2 avgLum = average;
+		
+		float cieLum = max(0.000001, lum); //ToCIE(color.rgb);
+		
+		float lumScaled = cieLum * _HdrParams.z / (0.001 + avgLum.x);
+		
+		lumScaled = (lumScaled * (1.0f + lumScaled / (avgLum.y*avgLum.y)))/(1.0f + lumScaled);
+		
+		//cie.r = lumScaled; 
+		
+		Color.rgb = Color.rgb * (lumScaled / cieLum);
+		
+		//color.rgb = FromCIE(cie);
+		return Color;
+	#endif
+	#ifdef TONEMAPPING_MODE_OFF
+		return Color;
+	#endif
+}
+//--------------------------------------------------------------------------------------
+// Compiler 1
+//--------------------------------------------------------------------------------------
+
+technique PostProcess
+{	
+	pass P0
+	{
+		VertexShader = compile vs_3_0 VS_PostProcess();
+		PixelShader  = compile ps_3_0 CCShadow();
+	}
+}
